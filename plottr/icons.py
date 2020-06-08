@@ -44,3 +44,9 @@ gridIcon = QtGui.QIcon(
 xySelectIcon = QtGui.QIcon(
     os.path.join(gfxPath, "xy_select.svg")
 )
+
+paramFixIcon = QtGui.QIcon()
+paramFixIcon.addPixmap(QtGui.QPixmap(os.path.join(gfxPath,"param_lock.svg")),
+                       QtGui.QIcon.Normal, QtGui.QIcon.On)
+paramFixIcon.addPixmap(QtGui.QPixmap(os.path.join(gfxPath, "param_unlock.svg")),
+                       QtGui.QIcon.Normal, QtGui.QIcon.Off)

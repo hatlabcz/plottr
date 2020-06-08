@@ -1,172 +1,248 @@
-from typing import List, Tuple, Dict, Any
+import sys
+from typing import Dict, Any
+import inspect
 
+import numpy as np
+import lmfit
+
+from plottr import QtGui, Signal, Slot
+from plottr.utils import fitting_models
+from plottr.icons import paramFixIcon
+from ..data.datadict import DataDictBase
 from .node import Node, NodeWidget, updateOption
-from ..data.datadict import DataDictBase, DataDict
-from ..gui.data_display import DataSelectionWidget
-from plottr.icons import dataColumnsIcon
-from ..utils import num
+
+# from PyQt5 import QtGui
+
 
 __author__ = 'Chao Zhou'
 __license__ = 'MIT'
 
 
-class DataDisplayWidget(NodeWidget):
-    """
-    Simple Tree widget to show data and their dependencies in the node data.
-    """
-
-    icon = dataColumnsIcon
-
-    def __init__(self, node: Node = None):
-        super().__init__(embedWidgetClass=DataSelectionWidget)
-
-        self.optSetters = {
-            'selectedData': self.setSelected,
-        }
-        self.optGetters = {
-            'selectedData': self.getSelected,
-        }
-
-        self.widget.dataSelectionMade.connect(
-            lambda x: self.signalOption('selectedData'))
-
-    def setSelected(self, vals: List[str]):
-        self.widget.setSelectedData(vals)
-        self._updateOptions(vals)
-
-    def getSelected(self) -> List[str]:
-        return self.widget.getSelectedData()
-
-    def setData(self, structure: DataDictBase,
-                shapes: Dict[str, Tuple[int, ...]], _: Any):
-        self.widget.setData(structure, shapes)
-
-    def setShape(self, shapes: Dict[str, Tuple[int, ...]]):
-        self.widget.setShape(shapes)
-
-    def _updateOptions(self, selected):
-        ds = self.widget._dataStructure
-        for n, w in self.widget.dataItems.items():
-            if selected != [] and ds[n]['axes'] != ds[selected[0]]['axes']:
-                self.widget.setItemEnabled(n, False)
-            else:
-                self.widget.setItemEnabled(n, True)
+def index_model_functions():
+    func_classes = inspect.getmembers(fitting_models, inspect.isclass)
+    func_dict = {}
+    for c in func_classes:
+        funcs = inspect.getmembers(c[1], inspect.isfunction)
+        func_dict[c[0]] = {name: func for (name, func) in funcs}
+    return func_dict
 
 
-class DataSelector(Node):
-    """
-    This node allows extracting data from datasets. The fields specified by
-    ``selectedData`` and their axes are kept, the rest is discarded.
-    All selected data fields must be compatible in the sense that they have the
-    same axes (also in the same order).
-    The utility of this node is that afterwards data can safely be processed
-    together, as the structure of all remaining fields is shared.
+MODEL_FUNCS = index_model_functions()
+MAX_FLOAT = sys.float_info.max
 
-    Properties of this node:
-    :selectedData: list of strings with compatible dependents.
+
+class FittingGui(NodeWidget):
+    """ Gui for controlling the fitting function and the initial guess of
+    fitting parameters.
+
     """
 
-    # TODO: allow the user to control dtypes.
+    def __init__(self, parent=None, confirm: bool = True, node=None):
+        super().__init__(parent)
+        self.confirm = confirm
+        self.layout = QtGui.QFormLayout()
+        self.setLayout(self.layout)
 
-    nodeName = "DataSelector"
-    uiClass = DataDisplayWidget
+        # set up model function selection widget
+        self.model_tree = self.addModelFunctionTree()
+        self.model_tree.currentItemChanged.connect(self.modelChanged)
 
-    force_numerical_data = True
+        # set up parameter table
+        self.param_table = QtGui.QTableWidget(0, 4)
+        self.param_table.setHorizontalHeaderLabels([
+            'fix', 'initial guess', 'lower bound', 'upper bound'])
+        self.param_table.horizontalHeader(). \
+            setSectionResizeMode(0, QtGui.QHeaderView.ResizeToContents)
+        self.layout.addWidget(self.param_table)
 
-    def __init__(self, *arg, **kw):
-        super().__init__(*arg, **kw)
+        self.addConfirm()
 
-        self._dataStructure = None
-        self.selectedData = []
+        self.optGetters['fitting_options'] = self.fittingOptionGetter
+        self.optSetters['fitting_options'] = lambda *args: None
 
-    # Properties
-
-    @property
-    def selectedData(self) -> List[str]:
-        return self._selectedData
-
-    @selectedData.setter
-    @updateOption('selectedData')
-    def selectedData(self, val: List[str]):
-        if isinstance(val, str):
-            val = [val]
-        self._selectedData = val
-
-    # Data processing
-
-    def validateOptions(self, data):
+    def addModelFunctionTree(self):
+        """ Set up the model function tree widget.
         """
-        Validations performed:
-        * only compatible data fields can be selected.
+        model_tree = QtGui.QTreeWidget()
+        model_tree.setHeaderHidden(True)
+        for func_type, funcs in MODEL_FUNCS.items():
+            model_root = QtGui.QTreeWidgetItem(model_tree, [func_type])
+            for func_name, func in funcs.items():
+                model_row = QtGui.QTreeWidgetItem(model_root, [func_name])
+                model_row.setToolTip(0, func.__doc__)
+        if not self.confirm:
+            model_tree.currentItemChanged.connect(self.signalAllOptions)
+
+        self.layout.addWidget(model_tree)
+
+        return model_tree
+
+    @Slot(QtGui.QTreeWidgetItem, QtGui.QTreeWidgetItem)
+    def modelChanged(self,
+                     current: QtGui.QTreeWidgetItem,
+                     previous: QtGui.QTreeWidgetItem):
+        """ Process a change in fit model selection.
+        Will update the parameter table based on the new selection.
         """
-        if data is None:
-            return True
+        if current.parent() is not None:  # not selecting on root
+            print(current.text(0))
+            # update parameter table for the current selected model function
+            self.updateParamTable(current)
 
-        for elt in self.selectedData:
-            if elt not in data:
-                self.logger().warning(
-                    f'Did not find selected data {elt} in data. '
-                    f'Clearing the selection.'
-                )
-                self._selectedData = []
+    def updateParamTable(self, model: QtGui.QTreeWidgetItem):
+        """ Update the parameter table based on the current selected model
+        function.
+        :param model: the current selected fitting function model
+        """
+        print(f"update table: {model.text(0)}")
+        # flush param table
+        self.param_table.setRowCount(0)
+        # rebuild param table based on the selected model function
+        func = MODEL_FUNCS[model.parent().text(0)][model.text(0)]
+        # assume the first variable is the independent variable
+        params = list(inspect.signature(func).parameters)[1:]
+        self.param_table.setRowCount(len(params))
+        self.param_table.setVerticalHeaderLabels(params)
+        # generate fix, initial guess, lower/upper bound option GUIs for each
+        # parameter
+        for idx, name in enumerate(params):
+            fixParamButton = self._paramFixButton()
+            initialGuessBox = self._optionSpinbox()
+            lowerBoundBox = self._optionSpinbox(default_value=-1 * MAX_FLOAT)
+            upperBoundBox = self._optionSpinbox(default_value=MAX_FLOAT)
 
-        if len(self.selectedData) > 0:
-            allowed_axes = data.axes(self.selectedData[0])
-            for d in self.selectedData:
-                if data.axes(d) != allowed_axes:
-                    self.logger().error(
-                        f'Datasets {self.selectedData[0]} '
-                        f'(with axes {allowed_axes}) '
-                        f'and {d}(with axes {data.axes(d)}) are not compatible '
-                        f'and cannot be selected simultaneously.'
-                        )
-                    return False
-        return True
+            lowerBoundBox.valueChanged.connect(initialGuessBox.setMinimum)
+            upperBoundBox.valueChanged.connect(initialGuessBox.setMaximum)
 
-    def _reduceData(self, data):
-        if isinstance(self.selectedData, str):
-            dnames = [self.selectedData]
-        else:
-            dnames = self.selectedData
-        if len(self.selectedData) == 0:
-            return None
+            self.param_table.setCellWidget(idx, 0, fixParamButton)
+            self.param_table.setCellWidget(idx, 1, initialGuessBox)
+            self.param_table.setCellWidget(idx, 2, lowerBoundBox)
+            self.param_table.setCellWidget(idx, 3, upperBoundBox)
 
-        ret = data.extract(dnames)
-        if self.force_numerical_data:
-            for d, _ in ret.data_items():
-                dt = num.largest_numtype(ret.data_vals(d),
-                                         include_integers=False)
-                if dt is not None:
-                    ret[d]['values'] = ret[d]['values'].astype(dt)
-                else:
-                    return None
+    def _paramFixButton(self, default_value: bool = False):
+        """generate a push button for the parameter fix option
+        :param default_value : param is fixed by default or not
+        :returns: a button widget
+        """
+        widget = QtGui.QPushButton(paramFixIcon, '')
+        widget.setCheckable(True)
+        widget.setChecked(default_value)
+        widget.setToolTip("when fixed, the parameter will be fixed to the "
+                          "initial guess value during fitting")
+        if not self.confirm:
+            widget.toggled.connect(self.signalAllOptions)
+        return widget
 
-        return ret
+    def _optionSpinbox(self, default_value: float = 0):
+        """generate a spinBox for parameter options
+        :param default_value : default value of the option
+        :returns: a spinbox widget
+        """
+        # TODO: Support easier input for large numbers
+        widget = QtGui.QDoubleSpinBox()
+        widget.setRange(-1 * MAX_FLOAT, MAX_FLOAT)
+        widget.setValue(default_value)
+        if not self.confirm:
+            widget.valueChanged.connect(self.signalAllOptions)
+        return widget
+
+    def addConfirm(self):
+        widget = QtGui.QPushButton('Confirm')
+        widget.pressed.connect(self.signalAllOptions)
+        self.layout.addWidget(widget)
+
+    def fittingOptionGetter(self) -> Dict:
+        """ get all the fitting options and put them into a dictionary
+        """
+        fitting_options = {'model': self.model_tree.currentItem()}
+        parameters = {}
+        for i in range(self.param_table.rowCount()):
+            param_options = {}
+            param_name = self.param_table.verticalHeaderItem(i).text()
+            get_cell = self.param_table.cellWidget
+            param_options['fixed'] = get_cell(i, 0).isChecked()
+            param_options['initialGuess'] = get_cell(i, 1).value()
+            param_options['lowerBound'] = get_cell(i, 2).value()
+            param_options['upperBound'] = get_cell(i, 3).value()
+            parameters[param_name] = param_options
+
+        fitting_options['parameters'] = parameters
+        return fitting_options
+
+    def fittingOptionSetter(self, fitting_options: Dict):
+        """ Set all the fitting options
+        """
+        self.model_tree.setCurrentItem(fitting_options['model'])
+        for i in range(self.param_table.rowCount()):
+            param_name = self.param_table.verticalHeaderItem(i).text()
+            param_options = fitting_options['parameters'][param_name]
+            get_cell = self.param_table.cellWidget
+            get_cell(i, 0).setChecked(param_options['fixed'])
+            get_cell(i, 1).setValue(param_options['initialGuess'])
+            get_cell(i, 2).setValue(param_options['lowerBound'])
+            get_cell(i, 3).setValue(param_options['upperBound'])
+
+
+class FittingNode(Node):
+    uiClass = FittingGui
+    nodeName = "Fitter"
+
+    def __init__(self, name, fitting_options = None):
+        super().__init__(name)
+
+        self.test_options()
 
     def process(self, dataIn: DataDictBase = None):
-        data = super().process(dataIn=dataIn)
-        if data is None:
-            return None
-        data = data['dataOut']
+        return print_fitOptions(self, dataIn)
 
-        # this is the actual operation of the node
-        data = self._reduceData(data)
-        if data is None:
-            return None
+    def test_options(self):
+        self._fitting_options = 'not chosen'
 
-        # it is possible at this stage that we have data in DataDictBase format
-        # which we cannot process further down the line.
-        # But after extraction of compatible date we can now convert.
-        if isinstance(data, DataDictBase):
-            data = DataDict(**data)
-            if not data.validate():
-                return None
+        def getter(self):
+            return self._fitting_options
 
-        return dict(dataOut=data)
+        @updateOption('fitting_options')
+        def setter(self, val):
+            setattr(self, '_fitting_options', val)
 
-    # Methods for GUI interaction
+        setattr(self.__class__, 'fitting_options', property(getter, setter))
 
-    def setupUi(self):
-        super().setupUi()
-        self.newDataStructure.connect(self.ui.setData)
-        self.dataShapesChanged.connect(self.ui.setShape)
+
+
+def sinefunc(x, amp, freq, phase):
+    return amp * np.sin(2 * np.pi * (freq * x + phase))
+
+def sinefit(self, dataIn: DataDictBase = None):
+    if dataIn is None:
+        return None
+
+    if len(dataIn.axes()) > 1 or len(dataIn.dependents()) > 1:
+        return dict(dataOut=dataIn)
+
+    axname = dataIn.axes()[0]
+    x = dataIn.data_vals(axname)
+    y = dataIn.data_vals(dataIn.dependents()[0])
+
+    sinemodel = lmfit.Model(sinefunc)
+    p0 = sinemodel.make_params(amp=1, freq=0.3, phase=0)
+    result = sinemodel.fit(y, p0, x=x)
+
+    dataOut = dataIn.copy()
+    if result.success:
+        dataOut['fit'] = dict(values=result.best_fit, axes=[axname, ])
+        dataOut.add_meta('info', result.fit_report())
+
+    return dict(dataOut=dataOut)
+
+
+def print_fitOptions(self, dataIn: DataDictBase = None):
+    if dataIn is None:
+        return None
+
+    if len(dataIn.axes()) > 1 or len(dataIn.dependents()) > 1:
+        return dict(dataOut=dataIn)
+
+    print('from node:', self.fitting_options)
+
+    dataOut = dataIn.copy()
+    return dict(dataOut=dataOut)
