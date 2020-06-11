@@ -8,7 +8,7 @@ from plottr import QtGui
 from plottr.data.datadict import DataDictBase, MeshgridDataDict
 from plottr.gui.widgets import makeFlowchartWithPlotWindow
 from plottr.node.dim_reducer import XYSelector
-from plottr.node.fitter import FittingNode
+from plottr.node.fitter import FittingNode, FittingOptions, ParamOptions
 
 
 def makeData():
@@ -19,10 +19,23 @@ def makeData():
     noise = np.random.normal(scale=0.2, size=data.shape)
     data += noise
 
+    amp = ParamOptions(False, 1)
+    omega = ParamOptions(False, 2)
+    phase = ParamOptions(False, 0)
+
+    parameters = {'amp': amp,
+                  'omega': omega,
+                  'phase': phase}
+    fitting_options = FittingOptions('GenericFunctions.Sinusoidal', parameters)
+
+
+
+
     dd = MeshgridDataDict(
         x=dict(values=xx),
         repetition=dict(values=rr),
         sine=dict(values=data, axes=['x', 'repetition']),
+        __fitting_options__ = fitting_options
     )
     return dd
 
@@ -35,7 +48,7 @@ def sinefunc(x, amp, freq, phase):
 def makeNodeList():
     nodes = [
         ('Dimension selector', XYSelector),
-        ('Sine fitter', FittingNode)
+        ('Fitter', FittingNode)
     ]
     return nodes
 

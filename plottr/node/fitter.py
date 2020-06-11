@@ -1,11 +1,12 @@
 import sys
-from typing import Dict, Any
+from typing import Dict
 import inspect
+from dataclasses import dataclass
 
 import numpy as np
 import lmfit
 
-from plottr import QtGui, Signal, Slot
+from plottr import QtGui, QtCore, Slot
 from plottr.utils import fitting_models
 from plottr.icons import paramFixIcon
 from ..data.datadict import DataDictBase
@@ -29,6 +30,19 @@ def index_model_functions():
 
 MODEL_FUNCS = index_model_functions()
 MAX_FLOAT = sys.float_info.max
+
+@dataclass
+class ParamOptions:
+    fixed: bool = False
+    initialGuess: float = 0
+    lowerBound: float = -MAX_FLOAT
+    upperBound: float = MAX_FLOAT
+
+
+@dataclass
+class FittingOptions:
+    model: str
+    parameters: Dict[str,ParamOptions]
 
 
 class FittingGui(NodeWidget):
@@ -58,7 +72,8 @@ class FittingGui(NodeWidget):
         self.addConfirm()
 
         self.optGetters['fitting_options'] = self.fittingOptionGetter
-        self.optSetters['fitting_options'] = lambda *args: None
+        self.optSetters['fitting_options'] = self.fittingOptionSetter
+        #lambda *args: None
 
     def addModelFunctionTree(self):
         """ Set up the model function tree widget.
@@ -151,43 +166,55 @@ class FittingGui(NodeWidget):
         widget.pressed.connect(self.signalAllOptions)
         self.layout.addWidget(widget)
 
-    def fittingOptionGetter(self) -> Dict:
+    def fittingOptionGetter(self) -> FittingOptions:
         """ get all the fitting options and put them into a dictionary
         """
-        fitting_options = {'model': self.model_tree.currentItem()}
+        model_class = self.model_tree.currentItem().parent().text(0)
+        model_name = self.model_tree.currentItem().text(0)
+        model_str = f"{model_class}.{model_name}"
         parameters = {}
         for i in range(self.param_table.rowCount()):
-            param_options = {}
             param_name = self.param_table.verticalHeaderItem(i).text()
+            param_options = ParamOptions()
             get_cell = self.param_table.cellWidget
-            param_options['fixed'] = get_cell(i, 0).isChecked()
-            param_options['initialGuess'] = get_cell(i, 1).value()
-            param_options['lowerBound'] = get_cell(i, 2).value()
-            param_options['upperBound'] = get_cell(i, 3).value()
+            param_options.fixed = get_cell(i, 0).isChecked()
+            param_options.initialGuess = get_cell(i, 1).value()
+            param_options.lowerBound = get_cell(i, 2).value()
+            param_options.upperBound = get_cell(i, 3).value()
             parameters[param_name] = param_options
 
-        fitting_options['parameters'] = parameters
+        fitting_options = FittingOptions(model_str, parameters)
         return fitting_options
 
-    def fittingOptionSetter(self, fitting_options: Dict):
+    def fittingOptionSetter(self, fitting_options: FittingOptions):
         """ Set all the fitting options
         """
-        self.model_tree.setCurrentItem(fitting_options['model'])
+        #  Debug
+        sep_model = fitting_options.model.split('.')
+        func_used  = self.model_tree.findItems('Sinusoidal', QtCore.Qt.MatchRecursive)
+        if len(func_used) == 0:
+            raise NameError("Function Model doesn't exist")
+        if len(func_used) > 1:
+            raise NameError("Duplicate function name")
+        self.model_tree.setCurrentItem(func_used[0])
+        print('hello from setter')
+
+        '''
         for i in range(self.param_table.rowCount()):
             param_name = self.param_table.verticalHeaderItem(i).text()
-            param_options = fitting_options['parameters'][param_name]
+            param_options = fitting_options.parameters[param_name]
             get_cell = self.param_table.cellWidget
-            get_cell(i, 0).setChecked(param_options['fixed'])
-            get_cell(i, 1).setValue(param_options['initialGuess'])
-            get_cell(i, 2).setValue(param_options['lowerBound'])
-            get_cell(i, 3).setValue(param_options['upperBound'])
-
+            get_cell(i, 0).setChecked(param_options.fixed)
+            get_cell(i, 1).setValue(param_options.initialGuess)
+            get_cell(i, 2).setValue(param_options.lowerBound)
+            get_cell(i, 3).setValue(param_options.upperBound)
+        '''
 
 class FittingNode(Node):
     uiClass = FittingGui
     nodeName = "Fitter"
 
-    def __init__(self, name, fitting_options = None):
+    def __init__(self, name):
         super().__init__(name)
 
         self.test_options()
@@ -242,7 +269,25 @@ def print_fitOptions(self, dataIn: DataDictBase = None):
     if len(dataIn.axes()) > 1 or len(dataIn.dependents()) > 1:
         return dict(dataOut=dataIn)
 
-    print('from node:', self.fitting_options)
+    print('GUI Selects:', self.fitting_options)
+    # self.fitting_options = dataIn.get('__fitting_options__')
+    print('From DataIn', dataIn['__fitting_options__'])
+
+    dataOut = dataIn.copy()
+    return dict(dataOut=dataOut)
+
+
+def fitting_process(self, dataIn: DataDictBase = None):
+    if dataIn is None:
+        return None
+
+    if len(dataIn.axes()) > 1 or len(dataIn.dependents()) > 1:
+        return dict(dataOut=dataIn)
+
+    print('GUI Selects:', self.fitting_options)
+    print('From DataIn', dataIn['__fitting_options__'])
+
+    print (self.fitting_options)
 
     dataOut = dataIn.copy()
     return dict(dataOut=dataOut)
