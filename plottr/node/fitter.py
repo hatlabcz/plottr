@@ -31,8 +31,8 @@ def index_model_functions():
 MODEL_FUNCS = index_model_functions()
 MAX_FLOAT = sys.float_info.max
 
-@dataclass
-class ParamOptions:
+@dataclass # TODO : add opther options for parameters, e.g. constrains
+class ParamOptions: # Maybe just use the lmfit.Parameter object instead?
     fixed: bool = False
     initialGuess: float = 0
     lowerBound: float = -MAX_FLOAT
@@ -189,17 +189,16 @@ class FittingGui(NodeWidget):
     def fittingOptionSetter(self, fitting_options: FittingOptions):
         """ Set all the fitting options
         """
-        #  Debug
         sep_model = fitting_options.model.split('.')
-        func_used  = self.model_tree.findItems('Sinusoidal', QtCore.Qt.MatchRecursive)
+        func_used  = self.model_tree.findItems(sep_model[-1],
+                                               QtCore.Qt.MatchRecursive)
+
         if len(func_used) == 0:
             raise NameError("Function Model doesn't exist")
         if len(func_used) > 1:
             raise NameError("Duplicate function name")
         self.model_tree.setCurrentItem(func_used[0])
-        print('hello from setter')
 
-        '''
         for i in range(self.param_table.rowCount()):
             param_name = self.param_table.verticalHeaderItem(i).text()
             param_options = fitting_options.parameters[param_name]
@@ -208,7 +207,7 @@ class FittingGui(NodeWidget):
             get_cell(i, 1).setValue(param_options.initialGuess)
             get_cell(i, 2).setValue(param_options.lowerBound)
             get_cell(i, 3).setValue(param_options.upperBound)
-        '''
+
 
 class FittingNode(Node):
     uiClass = FittingGui
@@ -217,77 +216,74 @@ class FittingNode(Node):
     def __init__(self, name):
         super().__init__(name)
 
-        self.test_options()
+        self._fitting_options = None
 
     def process(self, dataIn: DataDictBase = None):
-        return print_fitOptions(self, dataIn)
-
-    def test_options(self):
-        self._fitting_options = 'not chosen'
-
-        def getter(self):
-            return self._fitting_options
-
-        @updateOption('fitting_options')
-        def setter(self, val):
-            setattr(self, '_fitting_options', val)
-
-        setattr(self.__class__, 'fitting_options', property(getter, setter))
+        return self.fitting_process(dataIn)
 
 
+    @property
+    def fitting_options(self):
+        return self._fitting_options
 
-def sinefunc(x, amp, freq, phase):
-    return amp * np.sin(2 * np.pi * (freq * x + phase))
-
-def sinefit(self, dataIn: DataDictBase = None):
-    if dataIn is None:
-        return None
-
-    if len(dataIn.axes()) > 1 or len(dataIn.dependents()) > 1:
-        return dict(dataOut=dataIn)
-
-    axname = dataIn.axes()[0]
-    x = dataIn.data_vals(axname)
-    y = dataIn.data_vals(dataIn.dependents()[0])
-
-    sinemodel = lmfit.Model(sinefunc)
-    p0 = sinemodel.make_params(amp=1, freq=0.3, phase=0)
-    result = sinemodel.fit(y, p0, x=x)
-
-    dataOut = dataIn.copy()
-    if result.success:
-        dataOut['fit'] = dict(values=result.best_fit, axes=[axname, ])
-        dataOut.add_meta('info', result.fit_report())
-
-    return dict(dataOut=dataOut)
+    @fitting_options.setter
+    @updateOption('fitting_options')
+    def fitting_options(self, opt):
+        if isinstance(opt, FittingOptions):
+            self._fitting_options = opt
+        else:
+            raise TypeError('Wrong fitting options')
 
 
-def print_fitOptions(self, dataIn: DataDictBase = None):
-    if dataIn is None:
-        return None
-
-    if len(dataIn.axes()) > 1 or len(dataIn.dependents()) > 1:
-        return dict(dataOut=dataIn)
-
-    print('GUI Selects:', self.fitting_options)
-    # self.fitting_options = dataIn.get('__fitting_options__')
-    print('From DataIn', dataIn['__fitting_options__'])
-
-    dataOut = dataIn.copy()
-    return dict(dataOut=dataOut)
 
 
-def fitting_process(self, dataIn: DataDictBase = None):
-    if dataIn is None:
-        return None
+    def fitting_process(self, dataIn: DataDictBase = None):
+        if dataIn is None:
+            return None
 
-    if len(dataIn.axes()) > 1 or len(dataIn.dependents()) > 1:
-        return dict(dataOut=dataIn)
+        if len(dataIn.axes()) > 1 or len(dataIn.dependents()) > 1:
+            return dict(dataOut=dataIn)
 
-    print('GUI Selects:', self.fitting_options)
-    print('From DataIn', dataIn['__fitting_options__'])
+        dataIn_opt = dataIn.get('__fitting_options__')
+        if self.fitting_options is None:
+            if dataIn_opt is not None:
+                self.fitting_options = dataIn_opt
+                # option setter will call process again and do the fitting
+            return dict(dataOut=dataIn)
 
-    print (self.fitting_options)
+        # fitting process
+        axname = dataIn.axes()[0]
+        x = dataIn.data_vals(axname)
+        y = dataIn.data_vals(dataIn.dependents()[0])
 
-    dataOut = dataIn.copy()
-    return dict(dataOut=dataOut)
+        model_str = self.fitting_options.model.split('.')
+        model_func = MODEL_FUNCS[model_str[0]][model_str[1]]
+        fit_params = self.fitting_options.parameters
+        p0 = lmfit.Parameters()
+        for name, opt in fit_params.items():
+            p0.add(name, opt.initialGuess, not opt.fixed)
+        print (p0)
+        fit_model = lmfit.Model(model_func)
+        result = fit_model.fit(y, p0, x=x)
+
+        dataOut = dataIn.copy()
+        if result.success:
+            dataOut['fit'] = dict(values=result.best_fit, axes=[axname, ])
+            dataOut.add_meta('info', result.fit_report())
+
+        return dict(dataOut=dataOut)
+
+
+        # debug
+        # axname = dataIn.axes()[0]
+        # x = dataIn.data_vals(axname)
+        # model_str = self.fitting_options.model.split('.')
+        # func = MODEL_FUNCS[model_str[0]][model_str[1]]
+        # fit_params = self.fitting_options.parameters
+        # func_args = {arg: fit_params[arg].initialGuess for arg in fit_params}
+        #
+        # dataOut = dataIn.copy()
+        # dataOut['fit'] = dict(values=func(x,**func_args), axes=[axname, ])
+        # return dict(dataOut=dataOut)
+
+
