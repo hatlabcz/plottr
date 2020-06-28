@@ -52,9 +52,11 @@ class FittingGui(NodeWidget):
 
     """
 
-    def __init__(self, parent=None, confirm: bool = False, node=None):
+    def __init__(self, parent=None, node=None):
         super().__init__(parent)
-        self.confirm = confirm
+        self.param_signals = []
+        self.default_options = None
+
         self.layout = QtGui.QFormLayout()
         self.setLayout(self.layout)
 
@@ -70,7 +72,7 @@ class FittingGui(NodeWidget):
             setSectionResizeMode(0, QtGui.QHeaderView.ResizeToContents)
         self.layout.addWidget(self.param_table)
 
-        self.addConfirm()
+        self.addUpdateOptions()
 
         self.optGetters['fitting_options'] = self.fittingOptionGetter
         self.optSetters['fitting_options'] = self.fittingOptionSetter
@@ -86,8 +88,7 @@ class FittingGui(NodeWidget):
             for func_name, func in funcs.items():
                 model_row = QtGui.QTreeWidgetItem(model_root, [func_name])
                 model_row.setToolTip(0, func.__doc__)
-        if not self.confirm:
-            model_tree.itemSelectionChanged.connect(self.signalAllOptions)
+
 
         self.layout.addWidget(model_tree)
 
@@ -119,6 +120,7 @@ class FittingGui(NodeWidget):
         self.param_table.setVerticalHeaderLabels(params)
         # generate fix, initial guess, lower/upper bound option GUIs for each
         # parameter
+        self.param_signals = []
         for idx, name in enumerate(params):
             fixParamButton = self._paramFixButton()
 
@@ -128,6 +130,10 @@ class FittingGui(NodeWidget):
             lowerBoundBox.newTextEntered.connect(initialGuessBox.setMinimum)
             upperBoundBox.newTextEntered.connect(initialGuessBox.setMaximum)
 
+            self.param_signals.extend((fixParamButton.toggled,
+                                       initialGuessBox.valueChanged,
+                                       lowerBoundBox.newTextEntered,
+                                       upperBoundBox.newTextEntered))
 
             self.param_table.setCellWidget(idx, 0, fixParamButton)
             self.param_table.setCellWidget(idx, 1, initialGuessBox)
@@ -144,13 +150,50 @@ class FittingGui(NodeWidget):
         widget.setChecked(default_value)
         widget.setToolTip("when fixed, the parameter will be fixed to the "
                           "initial guess value during fitting")
-        if not self.confirm:
-            widget.toggled.connect(lambda x: self.signalAllOptions())
         return widget
 
-    def addConfirm(self):
-        widget = QtGui.QPushButton('Confirm')
-        widget.pressed.connect(self.signalAllOptions)
+    def addUpdateOptions(self):
+        widget = QtGui.QWidget()
+        grid = QtGui.QGridLayout()
+        liveUpdateCheck = QtGui.QCheckBox('Live Update')
+        grid.addWidget(liveUpdateCheck, 0, 0)
+        updateButton = QtGui.QPushButton("Update")
+        grid.addWidget(updateButton, 0, 1)
+        recallButton = QtGui.QPushButton("Recall")
+        grid.addWidget(recallButton, 0, 2)
+
+        def _signalAllOptions(*args):# to make it accept signals w/ milti args
+            self.signalAllOptions()
+
+        @Slot(QtCore.Qt.CheckState)
+        def setLiveUpdate(live:QtCore.Qt.CheckState):
+            if live==QtCore.Qt.Checked:
+                self.model_tree.currentItemChanged.connect(_signalAllOptions)
+                for sig in self.param_signals:
+                    sig.connect(_signalAllOptions)
+            else:
+                try:
+                    self.model_tree.currentItemChanged.disconnect(
+                        _signalAllOptions)
+                except TypeError:
+                    pass
+                for sig in self.param_signals:
+                    try:
+                        sig.disconnect(_signalAllOptions)
+                    except TypeError:
+                        pass
+
+
+        @Slot()
+        def reloadDefaultOption():
+            self.fittingOptionSetter(self.default_options)
+
+        liveUpdateCheck.stateChanged.connect(setLiveUpdate)
+        updateButton.pressed.connect(self.signalAllOptions)
+        recallButton.pressed.connect(reloadDefaultOption)
+        recallButton.setToolTip('recall the fitting options stored in the data')
+
+        widget.setLayout(grid)
         self.layout.addWidget(widget)
 
     def fittingOptionGetter(self) -> FittingOptions:
@@ -179,7 +222,6 @@ class FittingGui(NodeWidget):
         """ Set all the fitting options
         """
         print('setter in gui called')
-        all_param_options = fitting_options.parameters.copy()
         sep_model = fitting_options.model.split('.')
         func_used  = self.model_tree.findItems(sep_model[-1],
                                                QtCore.Qt.MatchRecursive)
@@ -191,11 +233,11 @@ class FittingGui(NodeWidget):
         self.model_tree.setCurrentItem(func_used[0])
         print('in setter, function set to ', sep_model)
         print('now fitting_options is ', fitting_options)
-        print('all_param_options is ', all_param_options)
+        print('all_param_options is ', fitting_options.parameters)
 
         for i in range(self.param_table.rowCount()):
             param_name = self.param_table.verticalHeaderItem(i).text()
-            param_options = all_param_options[param_name]
+            param_options = fitting_options.parameters[param_name]
             get_cell = self.param_table.cellWidget
             get_cell(i, 0).setChecked(param_options.fixed)
             get_cell(i, 1).setValue(param_options.initialGuess)
@@ -206,6 +248,8 @@ class FittingGui(NodeWidget):
     def setDefaultFit(self, fitting_options):
         print(f'updateGuiFromNode function got {fitting_options}')
         self.fittingOptionSetter(fitting_options)
+        if self.default_options is None:
+            self.default_options = fitting_options
 
 class OptionSpinbox(QtGui.QDoubleSpinBox):
     """A spinBox widget for parameter options
@@ -216,8 +260,6 @@ class OptionSpinbox(QtGui.QDoubleSpinBox):
         super().__init__(parent)
         self.setRange(-1 * MAX_FLOAT, MAX_FLOAT)
         self.setValue(default_value)
-        if not parent.confirm:
-            self.valueChanged.connect(lambda x: parent.signalAllOptions())
 
     def setMaximum(self, maximum):
         try:
@@ -251,8 +293,6 @@ class NumberInput(QtGui.QLineEdit):
         self.setValue(default_value)
         self.textChanged.connect(self.checkIfNumber)
         self.editingFinished.connect(self.emitNewText)
-        if not parent.confirm:
-            self.editingFinished.connect(parent.signalAllOptions)
 
     def checkIfNumber(self, value: str):
         try:
