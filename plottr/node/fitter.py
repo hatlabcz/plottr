@@ -1,4 +1,5 @@
 import sys
+import warnings
 from typing import Dict
 import inspect
 from dataclasses import dataclass
@@ -55,7 +56,8 @@ class FittingGui(NodeWidget):
     def __init__(self, parent=None, node=None):
         super().__init__(parent)
         self.param_signals = []
-        self.default_options = None
+        self.input_options = None
+        self.live_update = False
 
         self.layout = QtGui.QFormLayout()
         self.setLayout(self.layout)
@@ -130,6 +132,7 @@ class FittingGui(NodeWidget):
             lowerBoundBox.newTextEntered.connect(initialGuessBox.setMinimum)
             upperBoundBox.newTextEntered.connect(initialGuessBox.setMaximum)
 
+            # gather the param change signals for enabling live update
             self.param_signals.extend((fixParamButton.toggled,
                                        initialGuessBox.valueChanged,
                                        lowerBoundBox.newTextEntered,
@@ -139,6 +142,8 @@ class FittingGui(NodeWidget):
             self.param_table.setCellWidget(idx, 1, initialGuessBox)
             self.param_table.setCellWidget(idx, 2, lowerBoundBox)
             self.param_table.setCellWidget(idx, 3, upperBoundBox)
+
+        self.changeParamLiveUpdate(self.live_update)
 
     def _paramFixButton(self, default_value: bool = False):
         """generate a push button for the parameter fix option
@@ -159,50 +164,65 @@ class FittingGui(NodeWidget):
         grid.addWidget(liveUpdateCheck, 0, 0)
         updateButton = QtGui.QPushButton("Update")
         grid.addWidget(updateButton, 0, 1)
-        recallButton = QtGui.QPushButton("Recall")
-        grid.addWidget(recallButton, 0, 2)
-
-        def _signalAllOptions(*args):# to make it accept signals w/ milti args
-            self.signalAllOptions()
+        reloadInputOptButton = QtGui.QPushButton("Reload Input Option")
+        grid.addWidget(reloadInputOptButton, 0, 2)
 
         @Slot(QtCore.Qt.CheckState)
         def setLiveUpdate(live:QtCore.Qt.CheckState):
             if live==QtCore.Qt.Checked:
-                self.model_tree.currentItemChanged.connect(_signalAllOptions)
-                for sig in self.param_signals:
-                    sig.connect(_signalAllOptions)
+                self.model_tree.currentItemChanged.connect(
+                    self._signalAllOptions)
+                self.changeParamLiveUpdate(True)
+                self.live_update = True
             else:
                 try:
                     self.model_tree.currentItemChanged.disconnect(
-                        _signalAllOptions)
+                        self._signalAllOptions)
                 except TypeError:
                     pass
-                for sig in self.param_signals:
-                    try:
-                        sig.disconnect(_signalAllOptions)
-                    except TypeError:
-                        pass
-
+                self.changeParamLiveUpdate(False)
+                self.live_update = False
 
         @Slot()
-        def reloadDefaultOption():
-            self.fittingOptionSetter(self.default_options)
+        def reloadInputOption():
+            self.fittingOptionSetter(self.input_options)
 
         liveUpdateCheck.stateChanged.connect(setLiveUpdate)
         updateButton.pressed.connect(self.signalAllOptions)
-        recallButton.pressed.connect(reloadDefaultOption)
-        recallButton.setToolTip('recall the fitting options stored in the data')
+        reloadInputOptButton.pressed.connect(reloadInputOption)
+        reloadInputOptButton.setToolTip( 'reload the fitting options stored '
+                                         'in the input data')
 
         widget.setLayout(grid)
         self.layout.addWidget(widget)
+
+    def changeParamLiveUpdate(self, enable: bool):
+        if enable:
+            for psig in self.param_signals:
+                psig.connect(self._signalAllOptions)
+        else:
+            for psig in self.param_signals:
+                try:
+                    psig.disconnect(self._signalAllOptions)
+                except TypeError:
+                    pass
+
+    def _signalAllOptions(self,*args):
+        # to make the signalAllOptions accept signals w/ multi args
+        self.signalAllOptions()
 
     def fittingOptionGetter(self) -> FittingOptions:
         """ get all the fitting options and put them into a dictionary
         """
         print('getter in gui called')
-        model_class = self.model_tree.currentItem().parent().text(0)
+        model_class = self.model_tree.currentItem().parent()
+        if model_class is None: # selects on model class
+            warnings.warn('Indefinite fitting model selection. The fitting '
+                          'options in input data is used instead.')
+            return
+        model_class_name = model_class.text(0)
         model_name = self.model_tree.currentItem().text(0)
-        model_str = f"{model_class}.{model_name}"
+        model_str = f"{model_class_name}.{model_name}"
         parameters = {}
         for i in range(self.param_table.rowCount()):
             param_name = self.param_table.verticalHeaderItem(i).text()
@@ -222,6 +242,8 @@ class FittingGui(NodeWidget):
         """ Set all the fitting options
         """
         print('setter in gui called')
+        if fitting_options is None:
+            return
         sep_model = fitting_options.model.split('.')
         func_used  = self.model_tree.findItems(sep_model[-1],
                                                QtCore.Qt.MatchRecursive)
@@ -248,8 +270,8 @@ class FittingGui(NodeWidget):
     def setDefaultFit(self, fitting_options):
         print(f'updateGuiFromNode function got {fitting_options}')
         self.fittingOptionSetter(fitting_options)
-        if self.default_options is None:
-            self.default_options = fitting_options
+        if self.input_options is None:
+            self.input_options = fitting_options
 
 class OptionSpinbox(QtGui.QDoubleSpinBox):
     """A spinBox widget for parameter options
@@ -338,7 +360,7 @@ class FittingNode(Node):
     @fitting_options.setter
     @updateOption('fitting_options')
     def fitting_options(self, opt):
-        if isinstance(opt, FittingOptions):
+        if isinstance(opt, FittingOptions) or opt is None:
             self._fitting_options = opt
         else:
             raise TypeError('Wrong fitting options')
