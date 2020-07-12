@@ -5,11 +5,10 @@ import inspect
 from dataclasses import dataclass
 import numbers
 
-import numpy as np
 import lmfit
 
 from plottr import QtGui, QtCore, Slot, Signal
-from plottr.utils import fitting_models
+from ..fitting_models import fitting_models
 from plottr.icons import paramFixIcon
 from ..data.datadict import DataDictBase
 from .node import Node, NodeWidget, updateOption, updateGuiFromNode
